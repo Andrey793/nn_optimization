@@ -139,7 +139,7 @@ if __name__ == "__main__":
 
     train_sampler = DistributedSampler(train_dataset, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
-    train_dl = torch.utils.data.DataLoader(train_dataset, num_workers=0, batch_size=512, sampler=train_sampler)
+    train_dl = torch.utils.data.DataLoader(train_dataset, num_workers=0, batch_size=1024, sampler=train_sampler)
     val_dl = torch.utils.data.DataLoader(val_dataset, num_workers=0, batch_size=1024, sampler=val_sampler)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
 
