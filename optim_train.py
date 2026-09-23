@@ -119,7 +119,7 @@ if __name__ == "__main__":
     model = Trompt(n_columns=train_dataset.tensors[0].shape[1], n_prompts=128, d_model=128, n_cycles=6)
     device = torch.device('cuda:0')
     model.to(device)
-    model.compile(mode="max-autotune")
+    model.compile()
 
     train_dl = torch.utils.data.DataLoader(train_dataset, num_workers=0, batch_size=512, shuffle=True)
     val_dl = torch.utils.data.DataLoader(val_dataset, num_workers=0, batch_size=1024)
