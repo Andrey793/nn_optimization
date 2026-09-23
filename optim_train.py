@@ -144,7 +144,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
 
     AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    scaler = torch.amp.GradScaler('cuda', enabled=(AMP_DTYPE == torch.float16))
+    scaler = torch.amp.GradScaler('cuda', enabled=False)#(AMP_DTYPE == torch.float16))
 
     EPOCHS = 5
 
