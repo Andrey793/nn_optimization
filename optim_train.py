@@ -10,10 +10,6 @@ from tqdm import tqdm
 from torch.profiler import profile, ProfilerActivity, record_function, schedule
 import contextlib
 
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
-
 
 
 class TromptCell(nn.Module):
@@ -55,13 +51,10 @@ class TromptCell(nn.Module):
         x_column = self.ln_col(self.emb_column)
         mask = torch.softmax(x_prompt @ x_column.transpose(0, 1), dim=-1)
 
-        # x_emb = x_emb.unsqueeze(1) + self.dense_expand(x_emb.unsqueeze(-1)).permute(0, 3, 1, 2)
-        # x_out = (mask.unsqueeze(-1) * x_emb).sum(dim=2)
 
-        w = self.dense_expand.weight#.unsqueeze(-1)
-        b = self.dense_expand.bias#.unsqueeze(-1).unsqueeze(-1)
-        #x_emb = x_emb.unsqueeze(1) + x_emb.unsqueeze(1) * w + b
-        #x_out = (mask.unsqueeze(-1) * x_emb).sum(dim=2)
+
+        w = self.dense_expand.weight
+        b = self.dense_expand.bias
         x_out = mask @ x_emb * (1 + w).view(1, -1, 1) + b.view(1, -1, 1)
 
 
@@ -116,13 +109,6 @@ VAL_DATA = "https://huggingface.co/datasets/puhsu/hw01-data/resolve/main/val_dat
 if __name__ == "__main__":
     torch.manual_seed(0)
 
-    dist.init_process_group(backend='nccl')
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    local_rank = int(os.environ['LOCAL_RANK'])
-    torch.cuda.set_device(local_rank)
-    is_main = rank == 0
-
     train_dataset = torch.utils.data.TensorDataset(*map(torch.nan_to_num, load_from_url(TRAIN_DATA)))
     val_dataset = torch.utils.data.TensorDataset(*map(torch.nan_to_num, load_from_url(VAL_DATA)))
 
@@ -131,20 +117,13 @@ if __name__ == "__main__":
     train_dataset.tensors = (train_dataset.tensors[0], (train_dataset.tensors[1] - Y_mean) / Y_std)
 
     model = Trompt(n_columns=train_dataset.tensors[0].shape[1], n_prompts=128, d_model=128, n_cycles=6)
-    device = torch.device(f'cuda:{local_rank}')
+    device = torch.device('cuda:0')
     model.to(device)
-    model.compile()
-    model = DDP(model, device_ids=[local_rank])
-    n_cycles = len(model.module.tcells)
+    model.compile(mode="max-autotune")
 
-    train_sampler = DistributedSampler(train_dataset, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, shuffle=False)
-    train_dl = torch.utils.data.DataLoader(train_dataset, num_workers=0, batch_size=1024, sampler=train_sampler)
-    val_dl = torch.utils.data.DataLoader(val_dataset, num_workers=0, batch_size=1024, sampler=val_sampler)
+    train_dl = torch.utils.data.DataLoader(train_dataset, num_workers=0, batch_size=512, shuffle=True)
+    val_dl = torch.utils.data.DataLoader(val_dataset, num_workers=0, batch_size=1024)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
-
-    AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    scaler = torch.amp.GradScaler('cuda', enabled=False)#(AMP_DTYPE == torch.float16))
 
     EPOCHS = 5
 
@@ -165,40 +144,32 @@ if __name__ == "__main__":
     with prof_ctx as p:
         for e in range(1, EPOCHS + 1):
             model.train()
-            train_sampler.set_epoch(e)
-            for step, batch in enumerate(tqdm(train_dl, disable=not is_main)):
+            for step, batch in enumerate(tqdm(train_dl)):
                 x, y = batch
                 optimizer.zero_grad(set_to_none=True)
-                with torch.autocast('cuda', dtype=AMP_DTYPE):
-                    with torch.profiler.record_function("forward pass"):
-                        pred = model(x.to(device))
-                    with torch.profiler.record_function("loss"):
-                        loss = F.mse_loss(pred, y.unsqueeze(1).repeat(1, n_cycles).to(device))
+                with torch.profiler.record_function("forward pass"):
+                    pred = model(x.to(device))
+                with torch.profiler.record_function("loss"):
+                    loss = F.mse_loss(pred, y.unsqueeze(1).repeat(1, len(model.tcells)).to(device))
                 with torch.profiler.record_function("backward pass"):
-                    scaler.scale(loss).backward()
+                    loss.backward()
                 with torch.profiler.record_function("optimizer step"):
-                    scaler.step(optimizer)
-                    scaler.update()
+                    optimizer.step()
                 if USE_PROFILER:
                     p.step()
                 if USE_PROFILER and step >= (1+1+2)*3:
                     break
 
             model.eval()
-            mae = torch.zeros((), device=device)
+            mae = 0
             with torch.inference_mode():
                 for batch in val_dl:
                     x, y = batch
-                    with torch.autocast('cuda', dtype=AMP_DTYPE):
-                        pred = model(x.to(device))
-                    mae += (pred.float().mean(dim=-1) * Y_std + Y_mean - y.to(device)).abs().sum()
+                    pred = model(x.to(device))
+                    mae += (pred.mean(dim=-1) * Y_std + Y_mean - y.to(device)).abs().sum().item()
 
-                dist.all_reduce(mae, op=dist.ReduceOp.SUM)
-                mae = mae.item() / len(val_dataset)
+                mae = mae / len(val_dataset)
 
-                if is_main:
-                    print(f'>>> Epoch {e:>02}')
-                    print(f'Validation MAE = {mae:.5f}')
-                    print('>>>\n')
-
-    dist.destroy_process_group()
+                print(f'>>> Epoch {e:>02}')
+                print(f'Validation MAE = {mae:.5f}')
+                print('>>>\n')
